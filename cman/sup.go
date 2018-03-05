@@ -30,8 +30,15 @@ import "time"
 
 var ENotSupp = fmt.Errorf("Not Supported")
 var EAddrInUse = fmt.Errorf("Address In Use")
+var ETimeout = fmt.Errorf("Timeout")
 
 var bufs = sync.Pool{ New:func()interface{} { return make([]byte,1500) } }
+
+var to = make(chan time.Time)
+var cls = make(chan time.Time)
+func init() {
+	close(cls)
+}
 
 type UKey struct {
 	IP [16]byte
@@ -43,9 +50,14 @@ type Client struct {
 	A *net.UDPAddr
 	C chan []byte
 	K UKey
+	TO <- chan time.Time
 }
 func (c *Client) Read(b []byte) (int,error) {
-	p := <- c.C
+	var p []byte
+	select {
+		case p = <- c.C:
+		case <- c.TO: return 0,ETimeout
+	}
 	i := len(p)
 	j := len(b)
 	copy(b,p)
@@ -72,8 +84,19 @@ func (c *Client) LocalAddr() net.Addr {
 // Not supported
 func (c *Client) SetDeadline(t time.Time) error { return ENotSupp }
 
-// Not supported
-func (c *Client) SetReadDeadline(t time.Time) error { return ENotSupp }
+func (c *Client) SetReadDeadline(t time.Time) error {
+	if t.IsZero() {
+		c.TO = to
+	} else {
+		d := time.Until(t)
+		if d>0 {
+			c.TO = time.After(d)
+		} else {
+			c.TO = cls
+		}
+	}
+	return ENotSupp
+}
 
 // Not supported
 func (c *Client) SetWriteDeadline(t time.Time) error { return ENotSupp }
@@ -105,7 +128,7 @@ func (s *Server) Accept() (*Client,error) {
 		s.Lock()
 		c,ok := s.C[key]
 		if !ok {
-			c = &Client{S:s,A:a,C:make(chan []byte,16),K:key}
+			c = &Client{S:s,A:a,C:make(chan []byte,16),K:key,TO:to}
 			s.C[key] = c
 			s.Unlock()
 			c.C <- bf[:i]
@@ -122,7 +145,7 @@ func (s *Server) Create(a *net.UDPAddr) (*Client,error) {
 	var key UKey
 	copy(key.IP[:],a.IP.To16())
 	key.Port = a.Port
-	c := &Client{S:s,A:a,C:make(chan []byte,16),K:key}
+	c := &Client{S:s,A:a,C:make(chan []byte,16),K:key,TO:to}
 	
 	s.Lock()
 	defer s.Unlock()
